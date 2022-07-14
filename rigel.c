@@ -13,15 +13,21 @@ struct options parse_args(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    seed_random();
     struct options opts = parse_args(argc, argv);
-
-    printf("[!] Your computer's power level is %d\n", RAND_MAX);
 
     PROCESS_INFORMATION process = create_process(opts);
     wait_for(process, opts);
 
 
     return 0;
+}
+
+void seed_random() {
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+
+    srand(time.wMilliseconds + time.wSecond * 1000);
 }
 
 PROCESS_INFORMATION create_process(struct options opts) {
@@ -53,9 +59,6 @@ PROCESS_INFORMATION create_process(struct options opts) {
 }
 
 void wait_for(PROCESS_INFORMATION process, struct options opts) {
-    struct c_block *blocks = scan_memory(process.hProcess);
-    debug_c_block_list(blocks);
-
     while (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) {
         SuspendThread(process.hThread);
         corrupt(process.hProcess, opts);
@@ -74,142 +77,110 @@ void corrupt(HANDLE process, struct options opts) {
     printf("[!] RIGEL : CORRUPTION SPREADS.\n");
     printf("[!]\n");
 
-    MODULEINFO exe_module = get_module(process, opts);
-    printf("Entry point is %p\n", exe_module.EntryPoint);
+    struct c_block *blocks = scan_memory(process);
+    debug_c_block_list(blocks);
 
-    size_t bytes_read;
-    char *exe_memory = read_memory(process, exe_module, &bytes_read);
+    corrupt_blocks(process, blocks);
 
-    corrupt_memory(exe_memory, bytes_read);
-    write_memory(process, exe_module, exe_memory, bytes_read);
-
-    free(exe_memory);
+    free_c_block_list(blocks);
 }
 
-char *read_memory(HANDLE process, MODULEINFO mod, size_t *out_bytes_read) {
+void corrupt_blocks(HANDLE process, struct c_block *blocks) {
     int return_code;
-    size_t max_read = 1 << 20;
-    char *memory = malloc(max_read);
+    size_t _ignoredz;
+    int _ignoredd;
 
-    printf(" need to read %zd bytes\n", max_read);
-    
-    size_t read;
-    return_code = ReadProcessMemory(
-        process,
-        mod.EntryPoint,
-        memory,
-        max_read,
-        &read
-    );
-    printf("actually read %zd bytes\n", read);
+    struct c_block *current = blocks;
 
-    if (return_code == 0 && GetLastError() == 299) {
-        printf("[!] partial read\n");
-    } else {
-        check_fail(return_code, "ReadProcessMemory");
-    }
+    while (current != NULL) {
+        return_code = VirtualProtectEx(
+            process,
+            current->address,
+            current->size,
+            PAGE_EXECUTE_WRITECOPY,
+            &_ignoredd
+        );
 
-    *out_bytes_read = read;
-    return memory;
-}
+        if (return_code == 0) {
+            printf("[!corrupt]: a VPE attempt at %p, size %zd failed with (%d). Skipping.\n",
+                current->address,
+                current->size,
+                GetLastError()
+            );
+            
+            /*
+            current = current->next;
+            continue;
+            */
+        }
 
-void write_memory(HANDLE process, MODULEINFO mod, char *memory, size_t size) {
-    int return_code;
-    size_t written;
+        char *memory = malloc(current->size);
+        size_t read;
+        return_code = ReadProcessMemory(
+            process,
+            current->address,
+            memory,
+            current->size,
+            &read
+        );
 
-    int _old;
-    return_code = VirtualProtectEx(
-        process,
-        mod.EntryPoint,
-        size,
-        PAGE_EXECUTE_WRITECOPY,
-        &_old
-    );
+        if (return_code == 0 && GetLastError() == 299) {
+            printf("[ corrupt]: incomplete read occured\n");
+        } else if (return_code == 0) {
+            check_fail(return_code, "ReadProcessMemory");
+        }
 
-    check_fail(return_code, "VirtualProtectEx");
+        printf("[ corrupt]: %zd bytes were read at %p (wanted %zd)\n",
+            read,
+            current->address,
+            current->size
+        );
 
-    return_code = WriteProcessMemory(
-        process,
-        mod.EntryPoint,
-        memory,
-        size,
-        &written
-    );
-    printf("wrote back %zd bytes\n", written);
+        if (read == 0) {
+            printf("[ corrupt]: have no bytes... continuing\n");
 
-    if (return_code == 0 && GetLastError() == 299) {
-        printf("[!] partial write\n");
-    } else {
-        check_fail(return_code, "WriteProcessMemory");
+            current = current->next;
+            continue;
+        }
+
+        corrupt_memory(memory, read);
+
+        printf("[ corrupt]: %zd bytes of memory were corrupted\n", read); 
+
+        size_t written;
+        return_code = WriteProcessMemory(
+            process,
+            current->address,
+            memory,
+            read,
+            &written
+        );
+
+        if (return_code == 0 && GetLastError() == 299) {
+            printf("[ corrupt]: incomplete write occured\n");
+        } else if (return_code == 0) {
+            check_fail(return_code, "WriteProcessMemory");
+        }
+
+        printf("[ corrupt]: %zd bytes were written at %p (wanted %zd)\n",
+            written,
+            current->address,
+            read
+        );
+
+        free(memory);
+        current = current->next;
     }
 }
 
 void corrupt_memory(char *memory, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        if (rand() % 10000 == 0) {
-        }
+    if (size == 0) {
+        return;
     }
-}
 
-MODULEINFO get_module(HANDLE process, struct options opts) {
-    int return_code;
-
-    HMODULE *modules = malloc((1 << 8) * sizeof(HMODULE));
-    int modules_bytes;
-
-    return_code = EnumProcessModules(
-        process,
-        modules,
-        (1 << 8) * sizeof(HMODULE),
-        &modules_bytes
-    );
-
-    size_t modules_read = modules_bytes / sizeof(HMODULE);
-
-    check_fail(return_code, "EnumProcessModules");
-    printf("read %zd modules\n", modules_read);
-
-
-    for (int i = 0; i < modules_read; i++) {
-        char *filename = malloc(1 << 8);
-
-        return_code = GetModuleFileNameExA(
-            process,
-            modules[i],
-            filename,
-            1 << 8
-        );
-
-        check_fail(return_code, "GetModuleFileNameExA");
-
-        if (!strncmp(filename, opts.command, strlen(opts.command))) {
-            printf("module found: %s\n", filename);
-
-            MODULEINFO module;
-            ZeroMemory(&module, sizeof(module));
-
-            return_code = GetModuleInformation(
-                process,
-                modules[i],
-                &module,
-                sizeof(module)
-            );
-
-            check_fail(return_code, "GetModuleInformation");
-
-            free(filename);
-            free(modules);
-
-            return module;
-        }
-
-        free(filename);
-    }
-    
-    free(modules);
-    
-    printf("[!] couldn't find the executable module. ur fucked\n");
-    ExitProcess(1);
+    size_t index = rand() % size;
+    printf("[ corrupt]: byte at offset %zd corrupted\n", index);
+    memory[index]++;
 }
 
 // you have to free this entire structure (thanks obama)
@@ -240,8 +211,8 @@ struct c_block *scan_memory(HANDLE process) {
             break;
         }
 
-        if (memory.State == MEM_COMMIT) {
-            printf("[!scan] found a block of committed memory %zd large at %p\n",
+        if (memory.State == MEM_COMMIT && memory.Type == MEM_PRIVATE) {
+            printf("[!scan] found a block of private, committed memory %zd large at %p\n",
                 memory.RegionSize,
                 memory.BaseAddress
             );
@@ -300,4 +271,12 @@ void debug_c_block_list(struct c_block *head) {
 
         current = current->next;
     }
+}
+
+void free_c_block_list(struct c_block *head) {
+    if (head->next != NULL) {
+        free_c_block_list(head->next);
+    }
+
+    free(head);
 }
