@@ -21,13 +21,13 @@ This will produce a `rigel.exe` executable.
 ## Run
 
 `rigel` takes a single argument, which is the program to spawn for corruption. For instance,
-to spawn a new Notepad and start destroying it, use:
+to spawn a new Notepad and start corrupting it, run:
 
 ```
 rigel C:\Windows\notepad.exe
 ```
 
-You cannot attach to an already running process.
+You cannot attach rigel to an already running process.
 
 ## Future Work?
 
